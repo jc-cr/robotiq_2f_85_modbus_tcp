@@ -305,13 +305,35 @@ class Robotiq2F85Node:
         rospy.init_node('robotiq_2f_85_node')
         
         # Get parameters
-        ip_address = rospy.get_param('~ip_address', '192.168.1.140')
+        ip_address = rospy.get_param('~ip_address', '192.168.131.40')
         port = rospy.get_param('~port', 63352)
+        connection_timeout = rospy.get_param('~connection_timeout', 10)
         
         # Initialize gripper
         self.gripper = RobotiqGripper()
-        self.gripper.connect(ip_address, port)
-        self.gripper.activate()
+        
+        # Attempt to connect with timeout
+        rospy.loginfo(f"Attempting to connect to gripper at {ip_address}:{port}")
+        try:
+            self.gripper.connect(ip_address, port, socket_timeout=connection_timeout)
+        except socket.timeout:
+            rospy.logerr(f"Failed to connect to gripper at {ip_address}:{port}. Connection timed out.")
+            rospy.signal_shutdown("Gripper connection failed")
+            return
+        except socket.error as e:
+            rospy.logerr(f"Failed to connect to gripper at {ip_address}:{port}. Error: {e}")
+            rospy.signal_shutdown("Gripper connection failed")
+            return
+
+        rospy.loginfo("Successfully connected to gripper")
+
+        try:
+            self.gripper.activate()
+            rospy.loginfo("Gripper activated successfully")
+        except Exception as e:
+            rospy.logerr(f"Failed to activate gripper. Error: {e}")
+            rospy.signal_shutdown("Gripper activation failed")
+            return
 
         # Publishers
         self.position_pub = rospy.Publisher('robotiq_2f_85_gripper_control/current_position', Float64, queue_size=10)
@@ -334,7 +356,6 @@ class Robotiq2F85Node:
         return TriggerResponse(success=success, message="Gripper closed" if success else "Failed to close gripper")
 
     def set_goal_position(self, req):
-        # Use the 'data' field of SetBool as a normalized position (0.0 to 1.0)
         normalized_position = max(0.0, min(1.0, req.data))
         position = int(normalized_position * (self.gripper.get_closed_position() - self.gripper.get_open_position()) + self.gripper.get_open_position())
         _, status = self.gripper.move_and_wait_for_pos(position, 255, 255)
