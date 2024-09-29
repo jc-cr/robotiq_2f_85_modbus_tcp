@@ -296,50 +296,31 @@ class RobotiqGripper:
 
 
 import rospy
+import sys
+import traceback
 from std_srvs.srv import Trigger, TriggerResponse
 from std_srvs.srv import SetBool, SetBoolResponse
 from std_msgs.msg import Float64
 
 class Robotiq2F85Node:
     def __init__(self):
-        rospy.init_node('robotiq_2f_85_node')
+        rospy.init_node('robotiq_2f_85_modbus_tcp', anonymous=True)
         
         # Get parameters
-        ip_address = rospy.get_param('~ip_address', '192.168.131.40')
-        port = rospy.get_param('~port', 63352)
-        connection_timeout = rospy.get_param('~connection_timeout', 10)
+        self.ip_address = rospy.get_param('~ip_address', '192.168.131.40')
+        self.port = rospy.get_param('~port', 63352)
+        self.connection_timeout = rospy.get_param('~connection_timeout', 15)
         self.min_position = rospy.get_param('~min_position', 0.0)
         self.max_position = rospy.get_param('~max_position', 1.0)
         
         # Initialize gripper
-        self.gripper = RobotiqGripper()
-        
-        # Attempt to connect with timeout
-        rospy.loginfo(f"Attempting to connect to gripper at {ip_address}:{port}")
-        try:
-            self.gripper.connect(ip_address, port, socket_timeout=connection_timeout)
-        except socket.timeout:
-            rospy.logerr(f"Failed to connect to gripper at {ip_address}:{port}. Connection timed out.")
-            rospy.signal_shutdown("Gripper connection failed")
-            return
-        except socket.error as e:
-            rospy.logerr(f"Failed to connect to gripper at {ip_address}:{port}. Error: {e}")
-            rospy.signal_shutdown("Gripper connection failed")
-            return
+        self.gripper = None
+        self.connect_and_activate_gripper()
 
-        rospy.loginfo("Successfully connected to gripper")
-
-        try:
-            self.gripper.activate(auto_calibrate=False)  # Removed auto-calibration
-            rospy.loginfo("Gripper activated successfully")
-        except Exception as e:
-            rospy.logerr(f"Failed to activate gripper. Error: {e}")
-            rospy.signal_shutdown("Gripper activation failed")
+        if self.gripper is None:
+            rospy.logerr("Failed to initialize gripper. Shutting down node.")
+            rospy.signal_shutdown("Gripper initialization failed")
             return
-
-        # Set min and max positions
-        self.gripper._min_position = int(self.min_position * 255)
-        self.gripper._max_position = int(self.max_position * 255)
 
         # Publishers
         self.position_pub = rospy.Publisher('robotiq_2f_85_gripper_control/current_position', Float64, queue_size=10)
@@ -351,38 +332,85 @@ class Robotiq2F85Node:
         rospy.Service('robotiq_2f_85_gripper_control/set_goal_position', SetBool, self.set_goal_position)
         rospy.Service('robotiq_2f_85_gripper_control/auto_calibrate', Trigger, self.auto_calibrate)
 
+    def connect_and_activate_gripper(self):
+        try:
+            self.gripper = RobotiqGripper()
+            rospy.loginfo(f"Attempting to connect to gripper at {self.ip_address}:{self.port}")
+            self.gripper.connect(self.ip_address, self.port, socket_timeout=self.connection_timeout)
+            rospy.loginfo("Successfully connected to gripper")
+
+            self.gripper.activate(auto_calibrate=False)
+            rospy.loginfo("Gripper activated successfully")
+
+            # Set min and max positions
+            self.gripper._min_position = int(self.min_position * 255)
+            self.gripper._max_position = int(self.max_position * 255)
+
+        except Exception as e:
+            rospy.logerr(f"Error during gripper initialization: {e}")
+            rospy.logerr(traceback.format_exc())
+            self.gripper = None
+
     def open_gripper(self, req):
-        position, status = self.gripper.move_and_wait_for_pos(0, 255, 255)
-        success = status == RobotiqGripper.ObjectStatus.AT_DEST
-        return TriggerResponse(success=success, message="Gripper opened" if success else "Failed to open gripper")
+        try:
+            position, status = self.gripper.move_and_wait_for_pos(0, 255, 255)
+            success = status == RobotiqGripper.ObjectStatus.AT_DEST
+            return TriggerResponse(success=success, message="Gripper opened" if success else "Failed to open gripper")
+        except Exception as e:
+            rospy.logerr(f"Error in open_gripper: {e}")
+            return TriggerResponse(success=False, message=f"Error: {str(e)}")
 
     def close_gripper(self, req):
-        position, status = self.gripper.move_and_wait_for_pos(255, 255, 255)
-        success = status == RobotiqGripper.ObjectStatus.AT_DEST
-        return TriggerResponse(success=success, message="Gripper closed" if success else "Failed to close gripper")
+        try:
+            position, status = self.gripper.move_and_wait_for_pos(255, 255, 255)
+            success = status == RobotiqGripper.ObjectStatus.AT_DEST
+            return TriggerResponse(success=success, message="Gripper closed" if success else "Failed to close gripper")
+        except Exception as e:
+            rospy.logerr(f"Error in close_gripper: {e}")
+            return TriggerResponse(success=False, message=f"Error: {str(e)}")
 
     def set_goal_position(self, req):
-        normalized_position = max(0.0, min(1.0, req.data))
-        position = int(normalized_position * 255)
-        _, status = self.gripper.move_and_wait_for_pos(position, 255, 255)
-        success = status == RobotiqGripper.ObjectStatus.AT_DEST
-        return SetBoolResponse(success=success, message="Position set successfully" if success else "Failed to set position")
+        try:
+            normalized_position = max(0.0, min(1.0, req.data))
+            position = int(normalized_position * 255)
+            _, status = self.gripper.move_and_wait_for_pos(position, 255, 255)
+            success = status == RobotiqGripper.ObjectStatus.AT_DEST
+            return SetBoolResponse(success=success, message="Position set successfully" if success else "Failed to set position")
+        except Exception as e:
+            rospy.logerr(f"Error in set_goal_position: {e}")
+            return SetBoolResponse(success=False, message=f"Error: {str(e)}")
 
     def auto_calibrate(self, req):
-        self.gripper.auto_calibrate()
-        self.min_position = self.gripper.get_open_position() / 255.0
-        self.max_position = self.gripper.get_closed_position() / 255.0
-        return TriggerResponse(success=True, message="Auto-calibration completed")
+        try:
+            self.gripper.auto_calibrate()
+            self.min_position = self.gripper.get_open_position() / 255.0
+            self.max_position = self.gripper.get_closed_position() / 255.0
+            return TriggerResponse(success=True, message="Auto-calibration completed")
+        except Exception as e:
+            rospy.logerr(f"Error in auto_calibrate: {e}")
+            return TriggerResponse(success=False, message=f"Error: {str(e)}")
 
     def publish_status(self):
-        current_position = self.gripper.get_current_position() / 255.0
-        self.position_pub.publish(Float64(current_position))
-        
-        status = 1.0 if self.gripper.is_active() else 0.0
-        self.status_pub.publish(Float64(status))
+        try:
+            current_position = self.gripper.get_current_position() / 255.0
+            self.position_pub.publish(Float64(current_position))
+            
+            status = 1.0 if self.gripper.is_active() else 0.0
+            self.status_pub.publish(Float64(status))
+        except Exception as e:
+            rospy.logerr(f"Error in publish_status: {e}")
 
     def run(self):
         rate = rospy.Rate(10)  # 10 Hz
         while not rospy.is_shutdown():
             self.publish_status()
             rate.sleep()
+
+if __name__ == '__main__':
+    try:
+        node = Robotiq2F85Node()
+        node.run()
+    except Exception as e:
+        rospy.logerr(f"Unhandled exception in main: {e}")
+        rospy.logerr(traceback.format_exc())
+        sys.exit(1)
